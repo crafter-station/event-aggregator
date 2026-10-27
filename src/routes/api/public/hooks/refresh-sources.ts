@@ -4,8 +4,9 @@ import { selectDueForAutoRefresh } from "@/lib/scheduled-refresh";
 
 const TIME_BUDGET_MS = 25_000;
 
+// Screens stray traffic only. Safe to replay: each source refreshes at most once per 3 days.
 function authorized(request: Request): boolean {
-  const secret = process.env.CRON_SECRET;
+  const secret = process.env.SUPABASE_PUBLISHABLE_KEY ?? process.env.VITE_SUPABASE_PUBLISHABLE_KEY;
   const token = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
   if (!secret || !token) return false;
   const a = Buffer.from(token);
