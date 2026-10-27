@@ -26,6 +26,7 @@ import { Route as ApiPublicImageRouteImport } from './routes/api/public/image'
 import { Route as ApiV1CalendarsRouteImport } from './routes/api/v1/calendars'
 import { Route as ApiV1EventsRouteImport } from './routes/api/v1/events'
 import { Route as ApiV1HealthRouteImport } from './routes/api/v1/health'
+import { Route as ApiPublicHooksRefreshSourcesRouteImport } from './routes/api/public/hooks/refresh-sources'
 import { Route as ApiV1EventsCanonicalIdRouteImport } from './routes/api/v1/events/$canonicalId'
 import { Route as ApiV1EventsChangesRouteImport } from './routes/api/v1/events/changes'
 
@@ -116,6 +117,12 @@ const ApiV1HealthRoute = ApiV1HealthRouteImport.update({
   path: '/api/v1/health',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiPublicHooksRefreshSourcesRoute =
+  ApiPublicHooksRefreshSourcesRouteImport.update({
+    id: '/api/public/hooks/refresh-sources',
+    path: '/api/public/hooks/refresh-sources',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiV1EventsCanonicalIdRoute = ApiV1EventsCanonicalIdRouteImport.update({
   id: '/$canonicalId',
   path: '/$canonicalId',
@@ -144,6 +151,7 @@ export interface FileRoutesByFullPath {
   '/api/v1/calendars': typeof ApiV1CalendarsRoute
   '/api/v1/events': typeof ApiV1EventsRouteWithChildren
   '/api/v1/health': typeof ApiV1HealthRoute
+  '/api/public/hooks/refresh-sources': typeof ApiPublicHooksRefreshSourcesRoute
   '/api/v1/events/$canonicalId': typeof ApiV1EventsCanonicalIdRoute
   '/api/v1/events/changes': typeof ApiV1EventsChangesRoute
 }
@@ -164,6 +172,7 @@ export interface FileRoutesByTo {
   '/api/v1/calendars': typeof ApiV1CalendarsRoute
   '/api/v1/events': typeof ApiV1EventsRouteWithChildren
   '/api/v1/health': typeof ApiV1HealthRoute
+  '/api/public/hooks/refresh-sources': typeof ApiPublicHooksRefreshSourcesRoute
   '/api/v1/events/$canonicalId': typeof ApiV1EventsCanonicalIdRoute
   '/api/v1/events/changes': typeof ApiV1EventsChangesRoute
 }
@@ -186,6 +195,7 @@ export interface FileRoutesById {
   '/api/v1/calendars': typeof ApiV1CalendarsRoute
   '/api/v1/events': typeof ApiV1EventsRouteWithChildren
   '/api/v1/health': typeof ApiV1HealthRoute
+  '/api/public/hooks/refresh-sources': typeof ApiPublicHooksRefreshSourcesRoute
   '/api/v1/events/$canonicalId': typeof ApiV1EventsCanonicalIdRoute
   '/api/v1/events/changes': typeof ApiV1EventsChangesRoute
 }
@@ -208,6 +218,7 @@ export interface FileRouteTypes {
     | '/api/v1/calendars'
     | '/api/v1/events'
     | '/api/v1/health'
+    | '/api/public/hooks/refresh-sources'
     | '/api/v1/events/$canonicalId'
     | '/api/v1/events/changes'
   fileRoutesByTo: FileRoutesByTo
@@ -228,6 +239,7 @@ export interface FileRouteTypes {
     | '/api/v1/calendars'
     | '/api/v1/events'
     | '/api/v1/health'
+    | '/api/public/hooks/refresh-sources'
     | '/api/v1/events/$canonicalId'
     | '/api/v1/events/changes'
   id:
@@ -249,6 +261,7 @@ export interface FileRouteTypes {
     | '/api/v1/calendars'
     | '/api/v1/events'
     | '/api/v1/health'
+    | '/api/public/hooks/refresh-sources'
     | '/api/v1/events/$canonicalId'
     | '/api/v1/events/changes'
   fileRoutesById: FileRoutesById
@@ -266,6 +279,7 @@ export interface RootRouteChildren {
   ApiV1CalendarsRoute: typeof ApiV1CalendarsRoute
   ApiV1EventsRoute: typeof ApiV1EventsRouteWithChildren
   ApiV1HealthRoute: typeof ApiV1HealthRoute
+  ApiPublicHooksRefreshSourcesRoute: typeof ApiPublicHooksRefreshSourcesRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -389,6 +403,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiV1HealthRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/hooks/refresh-sources': {
+      id: '/api/public/hooks/refresh-sources'
+      path: '/api/public/hooks/refresh-sources'
+      fullPath: '/api/public/hooks/refresh-sources'
+      preLoaderRoute: typeof ApiPublicHooksRefreshSourcesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/v1/events/$canonicalId': {
       id: '/api/v1/events/$canonicalId'
       path: '/$canonicalId'
@@ -453,6 +474,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiV1CalendarsRoute: ApiV1CalendarsRoute,
   ApiV1EventsRoute: ApiV1EventsRouteWithChildren,
   ApiV1HealthRoute: ApiV1HealthRoute,
+  ApiPublicHooksRefreshSourcesRoute: ApiPublicHooksRefreshSourcesRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
