@@ -4,6 +4,7 @@
 // lu.ma now redirects to luma.com — both are handled.
 //
 // Server-only: external fetch, imported dynamically from server fns.
+import { fetchWithRetry } from "./http-retry.server";
 
 const LUMA_ORIGIN = "https://luma.com";
 const LUMA_API = "https://api.lu.ma";
@@ -52,7 +53,7 @@ function normalize(input: string): { slug: string; url: string } {
 }
 
 export async function getCalendarById(apiId: string): Promise<ResolvedCalendar | null> {
-  const res = await fetch(`${LUMA_API}/calendar/get?api_id=${encodeURIComponent(apiId)}`, {
+  const res = await fetchWithRetry(`${LUMA_API}/calendar/get?api_id=${encodeURIComponent(apiId)}`, {
     headers: { accept: "application/json" },
   });
   if (!res.ok) return null;
@@ -108,7 +109,7 @@ export async function resolveLumaCalendar(input: string): Promise<ResolvedCalend
   const directId = slug.match(/(?:^|\/)(cal-[A-Za-z0-9]+)$/i)?.[1];
   if (directId) return getCalendarById(directId);
 
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, {
     headers: { "user-agent": "Mozilla/5.0", accept: "text/html" },
     redirect: "follow",
   });
@@ -180,7 +181,7 @@ async function fetchPage(
     pagination_limit: "50",
   });
   if (cursor) qs.set("pagination_cursor", cursor);
-  const res = await fetch(`${LUMA_API}/calendar/get-items?${qs.toString()}`, {
+  const res = await fetchWithRetry(`${LUMA_API}/calendar/get-items?${qs.toString()}`, {
     headers: { accept: "application/json" },
   });
   if (!res.ok) {
@@ -218,23 +219,48 @@ export async function fetchPublicCalendarEvents(
  * Repeated or missing cursors are treated as upstream failures instead of
  * silently accepting a truncated calendar.
  */
+export type PublicEventsPage = {
+  period: "future" | "past";
+  cursor?: string;
+  nextCursor?: string;
+  pages: { future: number; past: number };
+  events: PublicLumaEvent[];
+};
+
 export async function fetchPublicCalendarEventSnapshot(
   calApiId: string,
   limit: number | null,
   scope: { kind: "full" } | { kind: "maintenance"; after: string } = { kind: "full" },
+  options?: {
+    resume?: {
+      period: "future" | "past";
+      cursor?: string;
+      pages?: { future: number; past: number };
+    };
+    onPage?: (page: PublicEventsPage) => Promise<void>;
+  },
 ): Promise<PublicCalendarEventSnapshot> {
   const out: PublicLumaEvent[] = [];
   const seen = new Set<string>();
-  const pages = { future: 0, past: 0 };
+  const pages = {
+    future: options?.resume?.pages?.future ?? 0,
+    past: options?.resume?.pages?.past ?? 0,
+  };
   const entriesSeen = { future: 0, past: 0 };
+  const periods =
+    options?.resume?.period === "past" ? (["past"] as const) : (["future", "past"] as const);
 
-  for (const period of ["future", "past"] as const) {
-    let cursor: string | undefined;
+  for (const period of periods) {
+    let cursor: string | undefined =
+      options?.resume?.period === period ? options.resume.cursor : undefined;
     const cursors = new Set<string>();
+    if (cursor) cursors.add(cursor);
     while (true) {
+      const pageCursor = cursor;
       const { entries, hasMore, nextCursor } = await fetchPage(calApiId, period, cursor);
       pages[period]++;
       entriesSeen[period] += entries.length;
+      const pageEvents: PublicLumaEvent[] = [];
       for (const e of entries) {
         const ev = e.event;
         if (!ev?.api_id) continue;
@@ -248,8 +274,17 @@ export async function fetchPublicCalendarEventSnapshot(
         }
         if (seen.has(ev.api_id)) continue;
         seen.add(ev.api_id);
-        out.push(toPublicEvent(e));
+        const mapped = toPublicEvent(e);
+        pageEvents.push(mapped);
+        out.push(mapped);
       }
+      await options?.onPage?.({
+        period,
+        cursor: pageCursor,
+        nextCursor,
+        pages: { ...pages },
+        events: pageEvents,
+      });
       if (limit !== null && out.length >= limit) {
         return {
           events: out.slice(0, limit),

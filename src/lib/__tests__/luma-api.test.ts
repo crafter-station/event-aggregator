@@ -1,10 +1,23 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { resetHttpRetryForTests, setHttpRetryClockForTests } from "../http-retry.server";
 import { fetchAllEvents, fetchCalendar, fetchEvent } from "../luma.server";
 
 const originalFetch = globalThis.fetch;
 
+beforeEach(() => {
+  let now = 0;
+  setHttpRetryClockForTests({
+    sleep: async (ms) => {
+      now += ms;
+    },
+    random: () => 0,
+    now: () => now,
+  });
+});
+
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  resetHttpRetryForTests();
 });
 
 describe("current Luma API", () => {

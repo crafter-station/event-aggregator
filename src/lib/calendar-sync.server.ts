@@ -7,6 +7,16 @@ import {
 } from "./owner-curated-catalog";
 import type { EventEnrichment } from "./canonical-events";
 import { summarizeEventCounts } from "./event-time";
+import {
+  rateLimitedJobPlan,
+  rateLimitedSourceStatus,
+  readFreshSyncResume,
+  selectLumaSyncPath,
+  shouldEnqueueCatalogRefresh,
+  shouldSkipLumaDuringCooldown,
+  type SyncResume,
+} from "./calendar-sync-policy";
+import { RateLimitedError, getHostCooldownUntil, isLumaHostCoolingDown } from "./http-retry.server";
 
 export type SyncSourceRow = {
   id: string;
@@ -16,7 +26,8 @@ export type SyncSourceRow = {
   curated_name: string | null;
   remote_name: string | null;
   calendar_url: string | null;
-  source_kind: "api" | "calendar" | "profile" | "event";
+  source_kind: "api" | "calendar" | "profile" | "event" | null;
+  api_key_ciphertext?: string | null;
   sync_status: string;
   sync_error: string | null;
   event_limit: number;
@@ -27,7 +38,7 @@ export type SyncSourceRow = {
   historical_sync_completed_at: string | null;
   last_sync_scope: "full" | "maintenance" | null;
   next_sync_at: string | null;
-  source_metadata: Record<string, string | number | boolean | null> | null;
+  source_metadata: Record<string, unknown> | null;
   calendar_avatar_url: string | null;
   calendar_cover_url: string | null;
   calendar_description: string | null;
@@ -49,7 +60,7 @@ export type SyncSourceRow = {
 };
 
 const SOURCE_COLUMNS =
-  "id,user_id,calendar_id,calendar_name,curated_name,remote_name,calendar_url,source_kind,sync_status,sync_error,event_limit,discovered_count,imported_count,last_synced_at,last_sync_attempted_at,historical_sync_completed_at,last_sync_scope,next_sync_at,source_metadata,calendar_avatar_url,calendar_cover_url,calendar_description,calendar_tint_color,metadata_version,group_id,sort_order,suggested_group_name,suggested_group_reason,luma_calendar_id,merged_into_id,source,organization_manual,provider,provider_source_id,provider_connection_id,ownership,sync_all_events";
+  "id,user_id,calendar_id,calendar_name,curated_name,remote_name,calendar_url,source_kind,api_key_ciphertext,sync_status,sync_error,event_limit,discovered_count,imported_count,last_synced_at,last_sync_attempted_at,historical_sync_completed_at,last_sync_scope,next_sync_at,source_metadata,calendar_avatar_url,calendar_cover_url,calendar_description,calendar_tint_color,metadata_version,group_id,sort_order,suggested_group_name,suggested_group_reason,luma_calendar_id,merged_into_id,source,organization_manual,provider,provider_source_id,provider_connection_id,ownership,sync_all_events";
 
 const CALENDAR_METADATA_VERSION = 1;
 const MAINTENANCE_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -68,6 +79,19 @@ export function resolveSyncScope(
 ): ResolvedSyncScope {
   if (requested === "full" || !historicalSyncCompletedAt) return { kind: "full" };
   return { kind: "maintenance", after: maintenanceAfter(now) };
+}
+
+async function persistSyncResume(source: SyncSourceRow, resume: SyncResume | null): Promise<void> {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const next = { ...(source.source_metadata ?? {}) };
+  if (resume) next.syncResume = resume;
+  else delete next.syncResume;
+  source.source_metadata = next;
+  const { error } = await supabaseAdmin
+    .from("user_luma_calendars" as never)
+    .update({ source_metadata: next } as never)
+    .eq("id", source.id);
+  if (error) throw new Error(error.message);
 }
 
 function suggestedGroup(source: SyncSourceRow, description: string | null) {
@@ -110,12 +134,7 @@ export async function ensureOwnerCuratedCatalog(userId: string): Promise<void> {
   if (user.user?.email?.toLowerCase() === CURATED_OWNER_EMAIL) {
     for (const [index, source] of OWNER_CURATED_SOURCES.entries()) {
       const row = await ensureCuratedSourceRow(userId, source, index);
-      if (
-        (row.metadata_version ?? 0) < CALENDAR_METADATA_VERSION ||
-        !row.calendar_avatar_url ||
-        !row.calendar_cover_url ||
-        ((row.imported_count ?? 0) === 0 && !row.source_metadata?.emptyConfirmed)
-      ) {
+      if (shouldEnqueueCatalogRefresh(row, CALENDAR_METADATA_VERSION)) {
         await enqueueSource(userId, row.id, "initial");
       }
     }
@@ -689,20 +708,69 @@ async function syncApiCalendar(userId: string, source: SyncSourceRow, scope: Res
   if (!resolved?.key) throw new Error("Luma API key is unavailable for this calendar");
   const { fetchAllEvents, fetchCalendar } = await import("./luma.server");
   const runStartedAt = new Date().toISOString();
-  let calendar;
+  const resume = readFreshSyncResume(source.source_metadata);
+  let calendar: Awaited<ReturnType<typeof fetchCalendar>> | undefined;
   let events: Awaited<ReturnType<typeof import("./luma.server").fetchAllEvents>>["events"] = [];
   let apiComplete = false;
   let apiPages = 0;
   try {
     const [cal, snapshot] = await Promise.all([
       fetchCalendar(resolved.key),
-      fetchAllEvents(resolved.key, scope),
+      fetchAllEvents(resolved.key, scope, {
+        resumeCursor: resume?.cursor ?? undefined,
+        resumePages: typeof resume?.pages === "number" ? resume.pages : undefined,
+        onPage: async (page) => {
+          events.push(...page.events);
+          const { upsertCanonicalEventSource } = await import("./canonical-events.server");
+          for (let offset = 0; offset < page.events.length; offset += 10) {
+            await Promise.all(
+              page.events.slice(offset, offset + 10).map((event) =>
+                upsertCanonicalEventSource(userId, {
+                  event: {
+                    id: event.api_id,
+                    name: event.name,
+                    coverUrl: event.cover_url,
+                    url: event.url,
+                    startAt: event.start_at,
+                    endAt: event.end_at,
+                    city: event.geo_address_info?.city_state,
+                    description: event.description_md,
+                    calendarId: source.calendar_id,
+                    calendarName: calendar?.name ?? source.calendar_name ?? undefined,
+                  },
+                  sourceType: "api",
+                  calendarRowId: source.id,
+                  calendarId: source.calendar_id,
+                  calendarName: calendar?.name ?? source.calendar_name ?? undefined,
+                  sourceUrl: event.url,
+                  externalEventId: event.api_id,
+                  payload: {
+                    source: "luma-api",
+                    timezone: event.timezone ?? null,
+                    access: event.access ?? "manage",
+                    platform: event.platform ?? "luma",
+                    originCalendarId: event.calendar_id ?? null,
+                  },
+                  lastSyncedAt: runStartedAt,
+                }),
+              ),
+            );
+          }
+          await persistSyncResume(source, {
+            scope: scope.kind,
+            cursor: page.nextCursor,
+            pages: page.pages,
+            updatedAt: new Date().toISOString(),
+          });
+        },
+      }),
     ]);
     calendar = cal;
     events = snapshot.events;
     apiComplete = snapshot.complete;
     apiPages = snapshot.pages;
   } catch (error) {
+    if (error instanceof RateLimitedError) throw error;
     const apiError = error instanceof Error ? error.message : String(error);
     if (!source.calendar_url) throw error;
     try {
@@ -724,42 +792,10 @@ async function syncApiCalendar(userId: string, source: SyncSourceRow, scope: Res
       throw new Error(`${apiError}; public link fallback failed: ${linkError}`);
     }
   }
-  const { upsertCanonicalEventSource } = await import("./canonical-events.server");
-  for (let offset = 0; offset < events.length; offset += 10) {
-    await Promise.all(
-      events.slice(offset, offset + 10).map((event) =>
-        upsertCanonicalEventSource(userId, {
-          event: {
-            id: event.api_id,
-            name: event.name,
-            coverUrl: event.cover_url,
-            url: event.url,
-            startAt: event.start_at,
-            endAt: event.end_at,
-            city: event.geo_address_info?.city_state,
-            description: event.description_md,
-            calendarId: source.calendar_id,
-            calendarName: calendar.name,
-          },
-          sourceType: "api",
-          calendarRowId: source.id,
-          calendarId: source.calendar_id,
-          calendarName: calendar.name,
-          sourceUrl: event.url,
-          externalEventId: event.api_id,
-          payload: {
-            source: "luma-api",
-            timezone: event.timezone ?? null,
-            access: event.access ?? "manage",
-            platform: event.platform ?? "luma",
-            originCalendarId: event.calendar_id ?? null,
-          },
-          lastSyncedAt: runStartedAt,
-        }),
-      ),
-    );
+  if (apiComplete) {
+    await persistSyncResume(source, null);
+    await finalizeScopedSync(userId, source, runStartedAt, ["api"], scope, true);
   }
-  await finalizeScopedSync(userId, source, runStartedAt, ["api"], scope, true);
   const upcoming = events
     .map((event) => event.start_at)
     .filter((value) => Date.parse(value) >= Date.now())
@@ -819,6 +855,7 @@ async function syncCalendar(userId: string, source: SyncSourceRow, scope: Resolv
   const calendar = await resolveKnownLumaCalendar(userId, source);
   if (!calendar) throw new Error("Calendar is not publicly accessible");
   const runStartedAt = new Date().toISOString();
+  const resume = readFreshSyncResume(source.source_metadata);
   let eventSnapshot: Awaited<ReturnType<typeof fetchPublicCalendarEventSnapshot>> | null = null;
   let events: Awaited<ReturnType<typeof fetchPublicCalendarEventSnapshot>>["events"] = [];
   let publicError: string | null = null;
@@ -827,9 +864,52 @@ async function syncCalendar(userId: string, source: SyncSourceRow, scope: Resolv
       calendar.apiId,
       scope.kind === "maintenance" || source.sync_all_events ? null : source.event_limit || 80,
       scope,
+      {
+        resume:
+          resume?.period === "future" || resume?.period === "past"
+            ? {
+                period: resume.period,
+                cursor: resume.cursor ?? undefined,
+                pages:
+                  typeof resume.pages === "object"
+                    ? resume.pages
+                    : { future: 0, past: typeof resume.pages === "number" ? resume.pages : 0 },
+              }
+            : undefined,
+        onPage: async (page) => {
+          const rows = page.events.map((event) => ({
+            event_key: event.apiId,
+            source_url: event.url,
+            name: event.name,
+            description: null,
+            cover_url: event.coverUrl,
+            city: event.city,
+            start_at: event.startAt,
+            end_at: event.endAt,
+            host_name: event.hostNames[0] ?? null,
+            payload: {
+              source: "luma-public-api",
+              externalEventId: event.apiId,
+              listedByCalendarId: calendar.apiId,
+              originCalendarApiId: event.originCalendarApiId,
+              hostIds: event.hostIds,
+              hostNames: event.hostNames,
+            },
+          }));
+          if (rows.length > 0) await upsertScrapedRows(userId, source, rows, runStartedAt);
+          await persistSyncResume(source, {
+            scope: scope.kind,
+            period: page.period,
+            cursor: page.nextCursor ?? null,
+            pages: page.pages,
+            updatedAt: new Date().toISOString(),
+          });
+        },
+      },
     );
     events = eventSnapshot.events;
   } catch (error) {
+    if (error instanceof RateLimitedError) throw error;
     publicError = error instanceof Error ? error.message : String(error);
   }
   const fallbackRows: Array<Record<string, unknown>> = [];
@@ -900,6 +980,7 @@ async function syncCalendar(userId: string, source: SyncSourceRow, scope: Resolv
       : fallbackRows;
   await upsertScrapedRows(userId, source, rows, runStartedAt);
   if (!publicError) {
+    await persistSyncResume(source, null);
     await finalizeScopedSync(userId, source, runStartedAt, ["calendar_scrape"], scope);
   }
   const temporalCounts = summarizeEventCounts(
@@ -1108,7 +1189,32 @@ function stableHash(value: string): string {
   return Math.abs(hash).toString(36);
 }
 
-export async function processNextSyncJob(userId?: string, sourceId?: string): Promise<boolean> {
+function logJobOutcome(fields: {
+  host: string | null;
+  sourceId: string;
+  status: string;
+  attempt: number;
+  retryAfterMs: number | null;
+  pages: number | null;
+}): void {
+  console.info(
+    JSON.stringify({
+      event: "sync_job_outcome",
+      host: fields.host,
+      sourceId: fields.sourceId,
+      status: fields.status,
+      attempt: fields.attempt,
+      retryAfterMs: fields.retryAfterMs,
+      pages: fields.pages,
+    }),
+  );
+}
+
+export async function processNextSyncJob(
+  userId?: string,
+  sourceId?: string,
+  skipped = 0,
+): Promise<boolean> {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   let query = supabaseAdmin
     .from("event_sync_jobs" as never)
@@ -1152,6 +1258,30 @@ export async function processNextSyncJob(userId?: string, sourceId?: string): Pr
     .single();
   if (!sourceData) throw new Error("Sync source not found");
   const source = sourceData as unknown as SyncSourceRow;
+  if (shouldSkipLumaDuringCooldown(source.provider, isLumaHostCoolingDown()) && skipped < 20) {
+    const cooldownUntil = Math.max(
+      getHostCooldownUntil("api.lu.ma"),
+      getHostCooldownUntil("public-api.luma.com"),
+    );
+    await supabaseAdmin
+      .from("event_sync_jobs" as never)
+      .update({
+        status: "queued",
+        scheduled_at: new Date(Math.max(Date.now(), cooldownUntil)).toISOString(),
+        started_at: null,
+        attempt: job.attempt,
+        error: "Deferred while Luma host is in cooldown",
+      } as never)
+      .eq("id", job.id);
+    await supabaseAdmin
+      .from("user_luma_calendars" as never)
+      .update({
+        sync_status: rateLimitedSourceStatus(source.imported_count ?? 0),
+        sync_error: "Waiting for Luma rate-limit cooldown",
+      } as never)
+      .eq("id", source.id);
+    return processNextSyncJob(userId, sourceId, skipped + 1);
+  }
   const scope = resolveSyncScope(source.historical_sync_completed_at, job.sync_scope ?? "auto");
   const attemptedAt = new Date().toISOString();
   await supabaseAdmin
@@ -1169,9 +1299,9 @@ export async function processNextSyncJob(userId?: string, sourceId?: string): Pr
         ? await syncConnectedProvider(job.user_id, source, scope)
         : source.provider !== "luma"
           ? await syncPublicProvider(job.user_id, source, scope)
-          : source.source_kind === "api"
+          : selectLumaSyncPath(source) === "api"
             ? await syncApiCalendar(job.user_id, source, scope)
-            : source.source_kind === "profile"
+            : selectLumaSyncPath(source) === "profile"
               ? await syncProfile(job.user_id, source, scope)
               : await syncCalendar(job.user_id, source, scope);
     const persistedImported =
@@ -1244,7 +1374,53 @@ export async function processNextSyncJob(userId?: string, sourceId?: string): Pr
         finished_at: now.toISOString(),
       } as never)
       .eq("id", job.id);
+    logJobOutcome({
+      host: source.provider === "luma" ? "api.lu.ma" : source.provider,
+      sourceId: source.id,
+      status,
+      attempt: job.attempt + 1,
+      retryAfterMs: null,
+      pages:
+        "pages" in result.metadata && typeof result.metadata.pages === "number"
+          ? result.metadata.pages
+          : null,
+    });
   } catch (error) {
+    if (error instanceof RateLimitedError) {
+      const attempt = job.attempt + 1;
+      const plan = rateLimitedJobPlan(attempt, error.retryAfterMs);
+      const sourceStatus = rateLimitedSourceStatus(source.imported_count ?? 0);
+      const message = `Luma rate limited (${error.host}); retrying after ${Math.ceil(plan.retryAfterMs / 1000)}s`;
+      await supabaseAdmin
+        .from("user_luma_calendars" as never)
+        .update({
+          sync_status: sourceStatus,
+          sync_error: message,
+          last_sync_attempted_at: attemptedAt,
+          last_sync_scope: scope.kind,
+          next_sync_at: plan.scheduledAt,
+        } as never)
+        .eq("id", source.id);
+      await supabaseAdmin
+        .from("event_sync_jobs" as never)
+        .update({
+          status: plan.status,
+          scheduled_at: plan.scheduledAt,
+          started_at: null,
+          error: message,
+          finished_at: plan.status === "failed" ? new Date().toISOString() : null,
+        } as never)
+        .eq("id", job.id);
+      logJobOutcome({
+        host: error.host,
+        sourceId: source.id,
+        status: plan.status,
+        attempt,
+        retryAfterMs: plan.retryAfterMs,
+        pages: null,
+      });
+      return true;
+    }
     const message = error instanceof Error ? error.message : String(error);
     const unreachable = /not publicly accessible/i.test(message);
     const transient = /rate|429|5\d\d|temporar|timeout|fetch failed/i.test(message);
@@ -1267,6 +1443,14 @@ export async function processNextSyncJob(userId?: string, sourceId?: string): Pr
       .from("event_sync_jobs" as never)
       .update({ status: "failed", error: message, finished_at: new Date().toISOString() } as never)
       .eq("id", job.id);
+    logJobOutcome({
+      host: source.provider === "luma" ? "api.lu.ma" : source.provider,
+      sourceId: source.id,
+      status: "failed",
+      attempt: job.attempt + 1,
+      retryAfterMs: null,
+      pages: null,
+    });
   }
   const { error: cleanupError } = await supabaseAdmin.rpc(
     "cleanup_merged_calendar_rows" as never,
@@ -1280,14 +1464,10 @@ export async function processNextSyncJob(userId?: string, sourceId?: string): Pr
   return true;
 }
 
-export async function processSyncQueueForUser(
-  userId: string,
-  maxJobs = 4,
-  sourceIds?: string[],
-): Promise<{ processed: number; remaining: number }> {
+export async function recoverStaleSyncLeases(userId?: string): Promise<number> {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   const stale = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-  await supabaseAdmin
+  let query = supabaseAdmin
     .from("event_sync_jobs" as never)
     .update({
       status: "queued",
@@ -1295,9 +1475,46 @@ export async function processSyncQueueForUser(
       started_at: null,
       error: "Recovered stale worker lease",
     } as never)
-    .eq("user_id", userId)
     .eq("status", "running")
     .lt("started_at", stale);
+  if (userId) query = query.eq("user_id", userId);
+  const { data, error } = await query.select("id");
+  if (error) throw new Error(error.message);
+  return (data as Array<{ id: string }> | null)?.length ?? 0;
+}
+
+export async function recoverOrphanQueuedSources(): Promise<number> {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { data: stuck, error } = await supabaseAdmin
+    .from("user_luma_calendars" as never)
+    .select("id,user_id")
+    .eq("sync_status", "queued")
+    .eq("sync_enabled", true)
+    .is("merged_into_id", null)
+    .limit(500);
+  if (error) throw new Error(error.message);
+  let recovered = 0;
+  for (const row of (stuck as Array<{ id: string; user_id: string }> | null) ?? []) {
+    const { count } = await supabaseAdmin
+      .from("event_sync_jobs" as never)
+      .select("id", { count: "exact", head: true })
+      .eq("source_id", row.id)
+      .in("status", ["queued", "running"]);
+    if (!count) {
+      await enqueueSource(row.user_id, row.id, "scheduled");
+      recovered += 1;
+    }
+  }
+  return recovered;
+}
+
+export async function processSyncQueueForUser(
+  userId: string,
+  maxJobs = 4,
+  sourceIds?: string[],
+): Promise<{ processed: number; remaining: number }> {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  await recoverStaleSyncLeases(userId);
 
   let processed = 0;
   let requestedSourceIds = sourceIds?.slice(0, maxJobs);

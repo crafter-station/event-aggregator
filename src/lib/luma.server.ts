@@ -1,5 +1,6 @@
 // Server-only Luma API helpers. Never import from client bundles.
 // Auth: https://docs.lu.ma/reference/getting-started-with-your-api
+import { fetchWithRetry } from "./http-retry.server";
 
 export type LumaEvent = {
   api_id: string;
@@ -44,7 +45,7 @@ async function lumaFetch<T>(
   } else if (params) {
     for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
   }
-  const res = await fetch(url.toString(), {
+  const res = await fetchWithRetry(url.toString(), {
     headers: {
       accept: "application/json",
       "x-luma-api-key": apiKey,
@@ -138,16 +139,28 @@ function normalizeEvent(event: CurrentLumaEvent | LumaEvent): LumaEvent {
 
 export type LumaEventSyncScope = { kind: "full" } | { kind: "maintenance"; after: string };
 
+export type LumaEventsPage = {
+  events: LumaEvent[];
+  nextCursor: string | null;
+  pages: number;
+  complete: boolean;
+};
+
 export async function fetchAllEvents(
   apiKey: string,
   scope: LumaEventSyncScope = { kind: "full" },
+  options?: {
+    resumeCursor?: string;
+    resumePages?: number;
+    onPage?: (page: LumaEventsPage) => Promise<void>;
+  },
 ): Promise<{ events: LumaEvent[]; complete: boolean; pages: number }> {
   const out: LumaEvent[] = [];
-  let cursor: string | undefined;
+  let cursor: string | undefined = options?.resumeCursor;
   let complete = false;
-  let pages = 0;
+  let pages = options?.resumePages ?? 0;
   const MAX_PAGES = 400;
-  for (let i = 0; i < MAX_PAGES; i++) {
+  for (let i = pages; i < MAX_PAGES; i++) {
     pages = i + 1;
     const params = new URLSearchParams({
       pagination_limit: "100",
@@ -164,15 +177,22 @@ export async function fetchAllEvents(
       | { entries: Array<CurrentLumaEvent>; has_more: boolean; next_cursor?: string | null }
       | LumaListResponse
     >(apiKey, "/calendars/events/list", params);
+    const pageEvents: LumaEvent[] = [];
     for (const entry of data.entries ?? []) {
       const event = "event" in entry ? entry.event : entry;
-      out.push(normalizeEvent(event));
+      pageEvents.push(normalizeEvent(event));
     }
-    if (!data.has_more || !data.next_cursor) {
-      complete = true;
-      break;
-    }
-    cursor = data.next_cursor;
+    out.push(...pageEvents);
+    const nextCursor = data.has_more && data.next_cursor ? data.next_cursor : null;
+    complete = !nextCursor;
+    await options?.onPage?.({
+      events: pageEvents,
+      nextCursor,
+      pages,
+      complete,
+    });
+    if (complete) break;
+    cursor = nextCursor ?? undefined;
   }
   return {
     events: [...new Map(out.map((event) => [event.api_id, event])).values()],

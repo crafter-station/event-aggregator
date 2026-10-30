@@ -1,4 +1,9 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import {
+  RateLimitedError,
+  resetHttpRetryForTests,
+  setHttpRetryClockForTests,
+} from "../http-retry.server";
 import {
   fetchPublicCalendarEventSnapshot,
   fetchPublicCalendarEvents,
@@ -7,8 +12,20 @@ import {
 
 const originalFetch = globalThis.fetch;
 
+beforeEach(() => {
+  let now = 0;
+  setHttpRetryClockForTests({
+    sleep: async (ms) => {
+      now += ms;
+    },
+    random: () => 0,
+    now: () => now,
+  });
+});
+
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  resetHttpRetryForTests();
 });
 
 describe("public Luma calendars", () => {
@@ -251,5 +268,59 @@ describe("public Luma calendars", () => {
     expect(fetchPublicCalendarEvents("cal-abc123", 80)).rejects.toThrow(
       "Luma calendar events request failed (503)",
     );
+  });
+
+  test("a 429 on page 2 then success resumes from the cursor", async () => {
+    let blockSecondPage = true;
+    const cursors: Array<string | null> = [];
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      const url = new URL(String(input));
+      const cursor = url.searchParams.get("pagination_cursor");
+      cursors.push(cursor);
+      if (url.searchParams.get("period") === "past") {
+        return Response.json({ entries: [], has_more: false });
+      }
+      if (!cursor) {
+        return Response.json({
+          entries: [{ event: { api_id: "evt-1", name: "One", url: "one" } }],
+          has_more: true,
+          next_cursor: "page-2",
+        });
+      }
+      if (blockSecondPage) {
+        return new Response("rate", { status: 429, headers: { "retry-after": "1" } });
+      }
+      return Response.json({
+        entries: [{ event: { api_id: "evt-2", name: "Two", url: "two" } }],
+        has_more: false,
+      });
+    }) as typeof fetch;
+
+    const firstPages: string[] = [];
+    await expect(
+      fetchPublicCalendarEventSnapshot(
+        "cal-abc123",
+        null,
+        { kind: "full" },
+        {
+          onPage: async (page) => {
+            firstPages.push(...page.events.map((event) => event.apiId));
+          },
+        },
+      ),
+    ).rejects.toBeInstanceOf(RateLimitedError);
+    expect(firstPages).toEqual(["evt-1"]);
+    blockSecondPage = false;
+
+    const resumed = await fetchPublicCalendarEventSnapshot(
+      "cal-abc123",
+      null,
+      { kind: "full" },
+      {
+        resume: { period: "future", cursor: "page-2", pages: { future: 1, past: 0 } },
+      },
+    );
+    expect(resumed.events.map((event) => event.apiId)).toEqual(["evt-2"]);
+    expect(cursors).toContain("page-2");
   });
 });

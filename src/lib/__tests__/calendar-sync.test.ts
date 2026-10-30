@@ -6,6 +6,12 @@ import {
 } from "../owner-curated-catalog";
 import { summarizeCalendarLibrary } from "../event-library-stats.functions";
 import { maintenanceAfter, resolveSyncScope } from "../calendar-sync.server";
+import {
+  filterRunnableJobs,
+  rateLimitedJobPlan,
+  selectLumaSyncPath,
+  shouldEnqueueCatalogRefresh,
+} from "../calendar-sync-policy";
 
 describe("calendar sync inputs", () => {
   test("parses named lines, raw URLs, and markdown table rows", () => {
@@ -116,6 +122,74 @@ Hack0 — https://luma.com/hack0
     );
     expect(sources).toHaveLength(2);
     expect(new Set(sources.map((s) => s.provider)).size).toBe(2);
+  });
+});
+
+describe("catalog re-enqueue guard", () => {
+  const now = Date.parse("2026-10-30T12:00:00.000Z");
+
+  test("stops the cover re-enqueue loop after a completed sync", () => {
+    expect(
+      shouldEnqueueCatalogRefresh(
+        {
+          metadata_version: 1,
+          calendar_avatar_url: "https://img/avatar.png",
+          calendar_cover_url: null,
+          imported_count: 12,
+          last_sync_attempted_at: "2026-10-29T10:00:00.000Z",
+          sync_status: "completed",
+          source_metadata: { emptyConfirmed: false },
+        },
+        1,
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  test("does not enqueue initial when the source was attempted in the last 6 hours", () => {
+    expect(
+      shouldEnqueueCatalogRefresh(
+        {
+          metadata_version: 0,
+          calendar_cover_url: null,
+          imported_count: 0,
+          last_sync_attempted_at: "2026-10-30T11:00:00.000Z",
+          sync_status: "failed",
+        },
+        1,
+        now,
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("luma job routing and rate limits", () => {
+  test("a key row with null source_kind routes to the API path", () => {
+    expect(selectLumaSyncPath({ source_kind: null, api_key_ciphertext: "ciphertext" })).toBe("api");
+    expect(selectLumaSyncPath({ source_kind: "calendar", api_key_ciphertext: null })).toBe(
+      "calendar",
+    );
+  });
+
+  test("RateLimitedError requeues with a future scheduled_at and respects the attempt cap", () => {
+    const now = Date.parse("2026-10-30T12:00:00.000Z");
+    const retry = rateLimitedJobPlan(2, 5000, now, () => 0);
+    expect(retry.status).toBe("queued");
+    expect(Date.parse(retry.scheduledAt)).toBeGreaterThan(now);
+
+    const failed = rateLimitedJobPlan(5, 1000, now, () => 0);
+    expect(failed.status).toBe("failed");
+  });
+
+  test("one rate-limited Luma calendar does not stop a Meetup job in the same run", () => {
+    const remaining = filterRunnableJobs(
+      [
+        { id: "luma-1", provider: "luma" },
+        { id: "meetup-1", provider: "meetup" },
+      ],
+      true,
+    );
+    expect(remaining.map((job) => job.id)).toEqual(["meetup-1"]);
   });
 });
 

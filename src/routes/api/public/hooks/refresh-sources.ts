@@ -21,7 +21,16 @@ export const Route = createFileRoute("/api/public/hooks/refresh-sources")({
         if (!authorized(request)) return Response.json({ error: "Unauthorized" }, { status: 401 });
         const started = Date.now();
         const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-        const { enqueueSource, processNextSyncJob } = await import("@/lib/calendar-sync.server");
+        const {
+          enqueueDueSources,
+          enqueueSource,
+          processNextSyncJob,
+          recoverOrphanQueuedSources,
+          recoverStaleSyncLeases,
+        } = await import("@/lib/calendar-sync.server");
+        const recoveredLeases = await recoverStaleSyncLeases();
+        const recoveredOrphans = await recoverOrphanQueuedSources();
+        const dueEnqueued = await enqueueDueSources();
         const { data, error } = await supabaseAdmin
           .from("user_luma_calendars")
           .select("id,user_id,sync_status,last_sync_attempted_at")
@@ -30,10 +39,17 @@ export const Route = createFileRoute("/api/public/hooks/refresh-sources")({
           .limit(5000);
         if (error) return Response.json({ error: error.message }, { status: 500 });
         const due = selectDueForAutoRefresh(data ?? []);
-        for (const row of due) await enqueueSource(row.user_id, row.id, "scheduled", undefined, "maintenance");
+        for (const row of due)
+          await enqueueSource(row.user_id, row.id, "scheduled", undefined, "maintenance");
         let processed = 0;
         while (Date.now() - started < TIME_BUDGET_MS && (await processNextSyncJob())) processed++;
-        return Response.json({ queued: due.length, processed });
+        return Response.json({
+          queued: due.length,
+          processed,
+          dueEnqueued,
+          recoveredLeases,
+          recoveredOrphans,
+        });
       },
     },
   },
