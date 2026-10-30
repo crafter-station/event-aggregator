@@ -59,7 +59,7 @@ REST endpoints:
 | `GET /api/v1/calendars` | Calendars, groups, ownership, counts, and sync health. |
 | `GET /api/v1/events` | Canonical or source-level events with filters and pagination. |
 | `GET /api/v1/events/{canonicalId}` | One canonical event. |
-| `GET /api/v1/events/changes` | Incremental upserts and delete tombstones. |
+| `GET /api/v1/changes` | Incremental upserts and delete tombstones. Also available at `/api/v1/events/changes`. |
 
 The MCP server exposes `whoami`, `list_calendars`, and `list_events` at `/mcp`.
 

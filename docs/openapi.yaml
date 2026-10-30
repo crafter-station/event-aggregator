@@ -82,6 +82,25 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/ServerError" }
+  /api/v1/changes:
+    get:
+      tags: [Changes]
+      operationId: listEventChangesShort
+      summary: Read incremental event changes
+      description: Alias of /api/v1/events/changes. Prefer this path.
+      parameters:
+        - { name: since, in: query, schema: { type: string, default: "0" } }
+        - { $ref: "#/components/parameters/ChangesLimit" }
+      responses:
+        "200":
+          description: Upserts and delete tombstones since the cursor.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChangesResponse" }
+        "400": { $ref: "#/components/responses/BadParams" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
   /api/v1/events/changes:
     get:
       tags: [Changes]

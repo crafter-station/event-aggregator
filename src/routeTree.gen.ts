@@ -24,6 +24,7 @@ import { Route as Char91DotmcpChar93InvokeToolToolRouteImport } from './routes/[
 import { Route as AuthenticatedEEventIdRouteImport } from './routes/_authenticated/e.$eventId'
 import { Route as ApiPublicImageRouteImport } from './routes/api/public/image'
 import { Route as ApiV1CalendarsRouteImport } from './routes/api/v1/calendars'
+import { Route as ApiV1ChangesRouteImport } from './routes/api/v1/changes'
 import { Route as ApiV1EventsRouteImport } from './routes/api/v1/events'
 import { Route as ApiV1HealthRouteImport } from './routes/api/v1/health'
 import { Route as ApiPublicHooksRefreshSourcesRouteImport } from './routes/api/public/hooks/refresh-sources'
@@ -107,6 +108,11 @@ const ApiV1CalendarsRoute = ApiV1CalendarsRouteImport.update({
   path: '/api/v1/calendars',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiV1ChangesRoute = ApiV1ChangesRouteImport.update({
+  id: '/api/v1/changes',
+  path: '/api/v1/changes',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiV1EventsRoute = ApiV1EventsRouteImport.update({
   id: '/api/v1/events',
   path: '/api/v1/events',
@@ -149,6 +155,7 @@ export interface FileRoutesByFullPath {
   '/e/$eventId': typeof AuthenticatedEEventIdRoute
   '/api/public/image': typeof ApiPublicImageRoute
   '/api/v1/calendars': typeof ApiV1CalendarsRoute
+  '/api/v1/changes': typeof ApiV1ChangesRoute
   '/api/v1/events': typeof ApiV1EventsRouteWithChildren
   '/api/v1/health': typeof ApiV1HealthRoute
   '/api/public/hooks/refresh-sources': typeof ApiPublicHooksRefreshSourcesRoute
@@ -170,6 +177,7 @@ export interface FileRoutesByTo {
   '/e/$eventId': typeof AuthenticatedEEventIdRoute
   '/api/public/image': typeof ApiPublicImageRoute
   '/api/v1/calendars': typeof ApiV1CalendarsRoute
+  '/api/v1/changes': typeof ApiV1ChangesRoute
   '/api/v1/events': typeof ApiV1EventsRouteWithChildren
   '/api/v1/health': typeof ApiV1HealthRoute
   '/api/public/hooks/refresh-sources': typeof ApiPublicHooksRefreshSourcesRoute
@@ -193,6 +201,7 @@ export interface FileRoutesById {
   '/_authenticated/e/$eventId': typeof AuthenticatedEEventIdRoute
   '/api/public/image': typeof ApiPublicImageRoute
   '/api/v1/calendars': typeof ApiV1CalendarsRoute
+  '/api/v1/changes': typeof ApiV1ChangesRoute
   '/api/v1/events': typeof ApiV1EventsRouteWithChildren
   '/api/v1/health': typeof ApiV1HealthRoute
   '/api/public/hooks/refresh-sources': typeof ApiPublicHooksRefreshSourcesRoute
@@ -216,6 +225,7 @@ export interface FileRouteTypes {
     | '/e/$eventId'
     | '/api/public/image'
     | '/api/v1/calendars'
+    | '/api/v1/changes'
     | '/api/v1/events'
     | '/api/v1/health'
     | '/api/public/hooks/refresh-sources'
@@ -237,6 +247,7 @@ export interface FileRouteTypes {
     | '/e/$eventId'
     | '/api/public/image'
     | '/api/v1/calendars'
+    | '/api/v1/changes'
     | '/api/v1/events'
     | '/api/v1/health'
     | '/api/public/hooks/refresh-sources'
@@ -259,6 +270,7 @@ export interface FileRouteTypes {
     | '/_authenticated/e/$eventId'
     | '/api/public/image'
     | '/api/v1/calendars'
+    | '/api/v1/changes'
     | '/api/v1/events'
     | '/api/v1/health'
     | '/api/public/hooks/refresh-sources'
@@ -277,6 +289,7 @@ export interface RootRouteChildren {
   Char91DotmcpChar93InvokeToolToolRoute: typeof Char91DotmcpChar93InvokeToolToolRoute
   ApiPublicImageRoute: typeof ApiPublicImageRoute
   ApiV1CalendarsRoute: typeof ApiV1CalendarsRoute
+  ApiV1ChangesRoute: typeof ApiV1ChangesRoute
   ApiV1EventsRoute: typeof ApiV1EventsRouteWithChildren
   ApiV1HealthRoute: typeof ApiV1HealthRoute
   ApiPublicHooksRefreshSourcesRoute: typeof ApiPublicHooksRefreshSourcesRoute
@@ -389,6 +402,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiV1CalendarsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/v1/changes': {
+      id: '/api/v1/changes'
+      path: '/api/v1/changes'
+      fullPath: '/api/v1/changes'
+      preLoaderRoute: typeof ApiV1ChangesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/v1/events': {
       id: '/api/v1/events'
       path: '/api/v1/events'
@@ -472,6 +492,7 @@ const rootRouteChildren: RootRouteChildren = {
   Char91DotmcpChar93InvokeToolToolRoute: Char91DotmcpChar93InvokeToolToolRoute,
   ApiPublicImageRoute: ApiPublicImageRoute,
   ApiV1CalendarsRoute: ApiV1CalendarsRoute,
+  ApiV1ChangesRoute: ApiV1ChangesRoute,
   ApiV1EventsRoute: ApiV1EventsRouteWithChildren,
   ApiV1HealthRoute: ApiV1HealthRoute,
   ApiPublicHooksRefreshSourcesRoute: ApiPublicHooksRefreshSourcesRoute,
